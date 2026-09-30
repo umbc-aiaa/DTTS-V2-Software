@@ -23,12 +23,13 @@ const uint8_t CMD_INC_WRITE = 0x02; // Incremental Write
 const uint8_t REG_ADCDATA = 0x00; // ADC Channel Data Output Register
 const uint8_t REG_CONFIG0 = 0x01; // Configuration Register 0
 const uint8_t REG_CONFIG2 = 0x03; // Configuration Register 2
+const uint8_t REG_CONFIG3 = 0x04; // Configuration Register 3
 const uint8_t REG_MUX     = 0x06; // Multiplexer Register
 
-uint8_t readADC = 0;
+volatile bool readADC = false;
 
-void ARDUINO_ISR_ATTR updateReadADC (){
-  readADC = 1;
+void ARDUINO_ISR_ATTR updateReadADC() {
+    readADC = true;
 }
 
 
@@ -93,7 +94,7 @@ void setup() {
     // 1. Configure the Multiplexer (MUX Register 0x06)
     // To measure a shunt resistor connected to CH0, we configure VIN+ as CH0 (0000) 
     // and VIN- as AGND (1000)[cite: 1]. (Change 0x08 to 0x01 if using differential CH0/CH1).
-    writeRegister(REG_MUX, 0x08);
+    writeRegister(REG_MUX, 0x01);
 
     // 2. Configure Gain to 64x (CONFIG2 Register 0x03)
     // Bit 7-6: BOOST = 10 (Current x 1)
@@ -103,6 +104,8 @@ void setup() {
     // Bit 0: RESERVED = 1
     // Value = 0b10111011 = 0xBB
     writeRegister(REG_CONFIG2, 0xBB);
+
+    writeRegister(REG_CONFIG3, 0xC0);   // Continuous, 24-bit output
 
     // 3. Start ADC Conversions (CONFIG0 Register 0x01)
     // Bit 7: VREF_SEL = 1 (Internal reference selected)[cite: 1].
@@ -117,36 +120,31 @@ void setup() {
 }
 
 void loop() {
-    // The data ready interrupt generates a falling edge on the IRQ pin[cite: 1].
     if (readADC) {
-                // 1. Configure the Multiplexer (MUX Register 0x06)
-    // To measure a shunt resistor connected to CH0, we configure VIN+ as CH0 (0000) 
-    // and VIN- as AGND (1000)[cite: 1]. (Change 0x08 to 0x01 if using differential CH0/CH1).
-    writeRegister(REG_MUX, 0x08);
+        readADC = false;
 
-    // 2. Configure Gain to 64x (CONFIG2 Register 0x03)
-    // Bit 7-6: BOOST = 10 (Current x 1)
-    // Bit 5-3: GAIN  = 111 (Gain is x64)[cite: 1].
-    // Bit 2: AZ_MUX  = 0
-    // Bit 1: AZ_REF  = 1
-    // Bit 0: RESERVED = 1
-    // Value = 0b10111011 = 0xBB
-    writeRegister(REG_CONFIG2, 0xBB);
-
-    // 3. Start ADC Conversions (CONFIG0 Register 0x01)
-    // Bit 7: VREF_SEL = 1 (Internal reference selected)[cite: 1].
-    // Bit 6: CONFIG0[6] = 1 (Required for normal mode)
-    // Bit 5-4: CLK_SEL = 10 (Internal RC Oscillator, no clock output)[cite: 1].
-    // Bit 3-2: CS_SEL = 00 (No burnout current)
-    // Bit 1-0: ADC_MODE = 11 (ADC Conversion mode)[cite: 1].
-    // Value = 0b11100011 = 0xE3
-    writeRegister(REG_CONFIG0, 0xE3);
-        readADC = 0;
         int32_t adcValue = readADCData();
-        
-        Serial.print("ADC Value: ");
-        Serial.println(adcValue);   
-        
-        delay(250); // Optional: slow down printing for readability
+
+        const float VREF = 2.4;
+        const float GAIN = 64.0;
+        const float SHUNT_RESISTANCE = 0.005; // 5 mOhm
+
+        float voltage = ((float)adcValue * VREF) /
+                        (8388608.0 * GAIN);
+
+        float current = voltage / SHUNT_RESISTANCE;
+
+        Serial.print("Raw ADC: ");
+        Serial.print(adcValue);
+
+        Serial.print(" | Divider Voltage: ");
+        Serial.print(voltage * 1000.0, 6);
+        Serial.print(" mV");
+
+        Serial.print(" | Current: ");
+        Serial.print(current, 6);
+        Serial.println(" A");
+
+        delay(250);
     }
 }
