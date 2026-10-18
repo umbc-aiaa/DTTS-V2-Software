@@ -9,6 +9,8 @@ const int MOSI_PIN = 11;
 const int SCK_PIN  = 12;
 const int MISO_PIN = 13;
 
+const int SENSE_VB_PIN = 1;
+
 // ---------------------------------------------------------
 // MCP3561/2/4R Commands and Registers
 // ---------------------------------------------------------
@@ -27,6 +29,7 @@ const uint8_t REG_CONFIG3 = 0x04; // Configuration Register 3
 const uint8_t REG_MUX     = 0x06; // Multiplexer Register
 
 volatile bool readADC = false;
+int32_t adcValue = 0;
 
 void ARDUINO_ISR_ATTR updateReadADC() {
     readADC = true;
@@ -80,6 +83,7 @@ void setup() {
     
     pinMode(IRQ_PIN, INPUT_PULLUP);
     pinMode(CS_PIN, OUTPUT);
+    // pinMode(SENSE_VB_PIN, INPUT);
     digitalWrite(CS_PIN, HIGH);
 
     // Initialize SPI on ESP32-S3 custom pins (SCK, MISO, MOSI, SS)
@@ -123,7 +127,8 @@ void loop() {
     if (readADC) {
         readADC = false;
 
-        int32_t adcValue = readADCData();
+        adcValue = readADCData();
+    } else {
 
         const float VREF = 2.4;
         const float GAIN = 64.0;
@@ -134,17 +139,18 @@ void loop() {
 
         float current = voltage / SHUNT_RESISTANCE;
 
-        Serial.print("Raw ADC: ");
+        Serial.print("Raw CURR: ");
         Serial.print(adcValue);
+        Serial.print(", RAW BAT V: "  );
+        Serial.println(analogRead(SENSE_VB_PIN));
 
-        Serial.print(" | Divider Voltage: ");
-        Serial.print(voltage * 1000.0, 6);
-        Serial.print(" mV");
+        // Serial.print(" | Divider Voltage: ");
+        // Serial.print(voltage * 1000.0, 6);
+        // Serial.print(" mV");
 
-        Serial.print(" | Current: ");
-        Serial.print(current, 6);
-        Serial.println(" A");
-
-        delay(250);
+        // Serial.print(" | Current: ");
+        // Serial.print(current, 6);
+        // Serial.println(" A");
+        delay(500);
     }
 }
