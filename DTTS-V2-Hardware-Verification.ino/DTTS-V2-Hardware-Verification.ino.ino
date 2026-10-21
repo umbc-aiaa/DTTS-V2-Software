@@ -11,6 +11,17 @@ const int MISO_PIN = 13;
 
 const int SENSE_VB_PIN = 1;
 
+const int IN_C_PIN = 16;
+const int IN_U_PIN = 17;
+const int IN_D_PIN = 18;
+const int IN_L_PIN = 38;
+const int IN_R_PIN = 21;
+const int IN_EST_PIN = 0;
+
+const int LED_R_PIN = 8;
+
+const int ESC_PWM_PIN = 15;
+
 // ---------------------------------------------------------
 // MCP3561/2/4R Commands and Registers
 // ---------------------------------------------------------
@@ -31,8 +42,33 @@ const uint8_t REG_MUX     = 0x06; // Multiplexer Register
 volatile bool readADC = false;
 int32_t adcValue = 0;
 
+long timeOffset = 0;
+
+int32_t throttle = 0;
+
 void ARDUINO_ISR_ATTR updateReadADC() {
     readADC = true;
+}
+
+void ARDUINO_ISR_ATTR incThrottle(){
+    throttle += 50;
+    throttle = throttle > 255 ? 255: throttle;
+}
+
+void ARDUINO_ISR_ATTR decThrottle(){
+    throttle -= 50;
+    throttle = throttle < 0 ? 0: throttle;
+}
+
+void ARDUINO_ISR_ATTR rstThrottle(){
+    throttle = 0;
+}
+void ARDUINO_ISR_ATTR setThrottle(){
+    throttle = 255;
+}
+
+void ARDUINO_ISR_ATTR rstTime(){
+    timeOffset = millis();
 }
 
 
@@ -83,7 +119,19 @@ void setup() {
     
     pinMode(IRQ_PIN, INPUT_PULLUP);
     pinMode(CS_PIN, OUTPUT);
-    // pinMode(SENSE_VB_PIN, INPUT);
+    pinMode(SENSE_VB_PIN, INPUT);
+
+    pinMode(IN_C_PIN, INPUT_PULLUP);
+    pinMode(IN_U_PIN, INPUT_PULLUP);
+    pinMode(IN_D_PIN, INPUT_PULLUP);
+    pinMode(IN_L_PIN, INPUT_PULLUP);
+    pinMode(IN_R_PIN, INPUT_PULLUP);
+    pinMode(IN_EST_PIN, INPUT_PULLUP);
+
+    pinMode(LED_R_PIN, OUTPUT);
+
+    pinMode(ESC_PWM_PIN, OUTPUT);
+
     digitalWrite(CS_PIN, HIGH);
 
     // Initialize SPI on ESP32-S3 custom pins (SCK, MISO, MOSI, SS)
@@ -94,6 +142,12 @@ void setup() {
 
     delay(100); // Allow time for Power-on Reset (POR)
     attachInterrupt(IRQ_PIN, updateReadADC, FALLING);
+
+    attachInterrupt(IN_U_PIN, incThrottle, FALLING);
+    attachInterrupt(IN_D_PIN, decThrottle, FALLING);
+    attachInterrupt(IN_L_PIN, setThrottle, FALLING);
+    attachInterrupt(IN_EST_PIN, rstThrottle, FALLING);
+    attachInterrupt(IN_C_PIN, rstTime, FALLING);
 
     // 1. Configure the Multiplexer (MUX Register 0x06)
     // To measure a shunt resistor connected to CH0, we configure VIN+ as CH0 (0000) 
@@ -139,9 +193,11 @@ void loop() {
 
         float current = voltage / SHUNT_RESISTANCE;
 
-        Serial.print("Raw CURR: ");
+        // Serial.print("Raw CURR: ");
+        Serial.print(millis() - timeOffset);
+        Serial.print(",");
         Serial.print(adcValue);
-        Serial.print(", RAW BAT V: "  );
+        Serial.print(","  );
         Serial.println(analogRead(SENSE_VB_PIN));
 
         // Serial.print(" | Divider Voltage: ");
@@ -151,6 +207,8 @@ void loop() {
         // Serial.print(" | Current: ");
         // Serial.print(current, 6);
         // Serial.println(" A");
-        delay(500);
+        delay(10);
     }
+    analogWrite(ESC_PWM_PIN, throttle);
+    analogWrite(LED_R_PIN, 255-throttle);
 }
