@@ -9,7 +9,9 @@ const int IN_U_PIN = 21;     // up
 const int IN_D_PIN = 38;     // down
 const int IN_L_PIN = 18;     // left
 const int IN_R_PIN = 17;     // right
-const int LED_R_PIN = 8;    // common-anode red LED, active LOW
+const int LED_R_PIN = 8;    // common-anode RGB LED, red channel, active LOW
+const int LED_G_PIN = 6;    // common-anode RGB LED, green channel, active LOW
+const int LED_B_PIN = 7;    // common-anode RGB LED, blue channel, active LOW
 const int ESC_PWM_PIN = 15; // -> comparator U6 -> J5 ESC signal
 
 // ---------------------------------------------------------
@@ -27,7 +29,28 @@ const unsigned long ARM_HOLD_MS = 1000;
 const unsigned long RAMP_INTERVAL_MS = 20;
 const unsigned long STARTUP_WAIT_MS = 5000;
 
+// ESC calibration
+const unsigned long CAL_HOLD_MS = 3000;        // hold CENTER this long (while disabled) to start
+const unsigned long CAL_REMIND_MS = 5000;      // re-print the current instruction this often
+const unsigned long CAL_DONE_SHOW_MS = 3000;   // solid green after a successful calibration
+const unsigned long CAL_ABORT_SHOW_MS = 1500;  // fast red flashing after an abort
+
 Servo esc;
+
+// ---------------------------------------------------------
+// ESC calibration state
+// ---------------------------------------------------------
+enum CalState {
+  CAL_IDLE,             // not calibrating
+  CAL_WAIT_DISCONNECT,  // waiting for the user to unplug the ESC battery
+  CAL_HIGH,             // sending 100% throttle, waiting for battery + beeps
+  CAL_LOW               // sending 0% throttle, waiting for beeps + ready tones
+};
+CalState calState = CAL_IDLE;
+int calPulseUs = ESC_MIN_US;
+unsigned long lastCalRemindMs = 0;
+unsigned long calDoneUntilMs = 0;
+unsigned long calAbortUntilMs = 0;
 
 // More direct than the original 0..255: a pulse width, in microseconds.
 int throttleUs = ESC_MIN_US;       // desired output
@@ -135,7 +158,6 @@ void rstThrottle() {
   actualPulseUs = ESC_MIN_US;
   // output the ctrl pulse
   esc.writeMicroseconds(ESC_MIN_US);
-  digitalWrite(LED_R_PIN, HIGH); // red indicator OFF
 }
 
 // The immediate max mode
@@ -144,13 +166,135 @@ void setThrottle() {
     return;
 
   throttleUs = ESC_MAX_US;
-  digitalWrite(LED_R_PIN, LOW); // red indicator ON
 }
 
 // resets the time offset
 void rstTime() {
   timeOffset = millis();
   Serial.println("CENTER: time reset");
+}
+
+// ---------------------------------------------------------
+// RGB LED (common anode: LOW = ON)
+// ---------------------------------------------------------
+void setLed(bool r, bool g, bool b) {
+  digitalWrite(LED_R_PIN, r ? LOW : HIGH);
+  digitalWrite(LED_G_PIN, g ? LOW : HIGH);
+  digitalWrite(LED_B_PIN, b ? LOW : HIGH);
+}
+
+// Picks the LED color from the current state every loop (non-blocking).
+//   abort flash      -> fast red blink
+//   cal: disconnect  -> slow blue blink
+//   cal: 100%        -> fast magenta blink (full-throttle warning)
+//   cal: 0%          -> slow yellow blink
+//   cal: done        -> solid green
+//   CENTER held 3 s  -> solid cyan ("release now to calibrate")
+//   control enabled  -> solid red
+//   idle             -> off
+void updateLed(unsigned long now) {
+  bool slowBlink = (now / 500) % 2;
+  bool fastBlink = (now / 125) % 2;
+
+  if (now < calAbortUntilMs) {
+    setLed(fastBlink, false, false);
+  } else if (calState == CAL_WAIT_DISCONNECT) {
+    setLed(false, false, slowBlink);
+  } else if (calState == CAL_HIGH) {
+    setLed(fastBlink, false, fastBlink);
+  } else if (calState == CAL_LOW) {
+    setLed(slowBlink, slowBlink, false);
+  } else if (now < calDoneUntilMs) {
+    setLed(false, true, false);
+  } else if (!enabled && centerButton.pressed && !centerWasHeldAtBoot &&
+             now - centerButton.pressedMs >= CAL_HOLD_MS) {
+    setLed(false, true, true);
+  } else if (enabled) {
+    setLed(true, false, false);
+  } else {
+    setLed(false, false, false);
+  }
+}
+
+// ---------------------------------------------------------
+// ESC calibration
+// ---------------------------------------------------------
+void printCalInstruction() {
+  switch (calState) {
+    case CAL_WAIT_DISCONNECT:
+      Serial.println("[CAL 1/3] Throttle at 0%. DISCONNECT the battery from the ESC, then press CENTER.");
+      break;
+    case CAL_HIGH:
+      Serial.println("[CAL 2/3] Throttle at 100%. CONNECT the battery now. Wait for the ESC beeps, then press CENTER.");
+      break;
+    case CAL_LOW:
+      Serial.println("[CAL 3/3] Throttle at 0%. Wait for the beeps and the ready tones, then press CENTER to finish.");
+      break;
+    default:
+      break;
+  }
+}
+
+void startCalibration(unsigned long now) {
+  rstThrottle(); // make sure normal control is off and output is at minimum
+  calState = CAL_WAIT_DISCONNECT;
+  calPulseUs = ESC_MIN_US;
+  esc.writeMicroseconds(calPulseUs);
+  lastCalRemindMs = now;
+
+  Serial.println();
+  Serial.println("========== ESC CALIBRATION ==========");
+  Serial.println("!! REMOVE THE PROPELLER before continuing !!");
+  Serial.println("Press RIGHT at any time to abort.");
+  printCalInstruction();
+}
+
+void advanceCalibration(unsigned long now) {
+  switch (calState) {
+    case CAL_WAIT_DISCONNECT:
+      calState = CAL_HIGH;
+      calPulseUs = ESC_MAX_US;
+      break;
+    case CAL_HIGH:
+      calState = CAL_LOW;
+      calPulseUs = ESC_MIN_US;
+      break;
+    case CAL_LOW:
+      calState = CAL_IDLE;
+      calPulseUs = ESC_MIN_US;
+      calDoneUntilMs = now + CAL_DONE_SHOW_MS;
+      break;
+    default:
+      return;
+  }
+  esc.writeMicroseconds(calPulseUs);
+  lastCalRemindMs = now;
+
+  if (calState == CAL_IDLE) {
+    Serial.println("[CAL] ESC calibration COMPLETE. Control is DISABLED; hold CENTER 1 s to enable.");
+    Serial.println("=====================================");
+  } else {
+    printCalInstruction();
+  }
+}
+
+void abortCalibration(unsigned long now) {
+  calState = CAL_IDLE;
+  calPulseUs = ESC_MIN_US;
+  esc.writeMicroseconds(ESC_MIN_US);
+  calAbortUntilMs = now + CAL_ABORT_SHOW_MS;
+  Serial.println("[CAL] Calibration ABORTED - throttle 0%. If the battery is connected, unplug it before retrying.");
+  Serial.println("=====================================");
+}
+
+// Re-print the current step so it doesn't scroll away
+void updateCalibration(unsigned long now) {
+  if (calState == CAL_IDLE)
+    return;
+  if (now - lastCalRemindMs >= CAL_REMIND_MS) {
+    lastCalRemindMs = now;
+    printCalInstruction();
+  }
 }
 
 // the most important control func
@@ -169,10 +313,21 @@ void processButtons(unsigned long now) {
   // Immediate software stop on either LEFT or RIGHT; this is NOT a
   // physical emergency cutoff. Ignore enable commands while held.
   if (digitalRead(IN_R_PIN) == LOW) {
-    if (enabled) 
+    if (calState != CAL_IDLE)
+      abortCalibration(now);
+
+    if (enabled)
       Serial.println("STOP: RIGHT pressed");
 
     rstThrottle();
+    return;
+  }
+
+  // During calibration, CENTER only advances to the next step;
+  // all other throttle buttons are ignored.
+  if (calState != CAL_IDLE) {
+    if (centerButton.justReleased)
+      advanceCalibration(now);
     return;
   }
 
@@ -191,8 +346,22 @@ void processButtons(unsigned long now) {
   if (centerButton.justReleased) {
     if (centerWasHeldAtBoot) {
       centerWasHeldAtBoot = false;
-    } 
-    // the button should be pressed for 2s to change the enable status
+    }
+    // Very long hold (>= 3 s) while disabled starts ESC calibration
+    else if (now - centerButton.pressedMs >= CAL_HOLD_MS && !enabled) {
+      if (now - startMs >= STARTUP_WAIT_MS &&
+          !upButton.pressed && !downButton.pressed) {
+        startCalibration(now);
+      } else {
+        Serial.println("Cannot calibrate yet: wait for startup / release UP and DOWN");
+      }
+    }
+    // Very long hold while enabled: just disable (calibration needs control off first)
+    else if (now - centerButton.pressedMs >= CAL_HOLD_MS && enabled) {
+      rstThrottle();
+      Serial.println("Control DISABLED. Hold CENTER 3 s again to start ESC calibration");
+    }
+    // the button should be pressed for 1s to change the enable status
     else if (now - centerButton.pressedMs >= ARM_HOLD_MS) {
       
       // If it was enable before, disable it
@@ -209,7 +378,6 @@ void processButtons(unsigned long now) {
         actualPulseUs = ESC_MIN_US;
         esc.writeMicroseconds(ESC_MIN_US);
         enabled = true;
-        digitalWrite(LED_R_PIN, LOW); // red indicator ON
         Serial.println("Control ENABLED at minimum throttle");
       } 
       
@@ -243,6 +411,13 @@ void updateESC(unsigned long now) {
 
   lastRampMs = now;
 
+  // Calibration drives the ESC directly (no ramping); otherwise the
+  // !enabled branch below would force the output back to minimum.
+  if (calState != CAL_IDLE) {
+    esc.writeMicroseconds(calPulseUs);
+    return;
+  }
+
   if (!enabled) {
     actualPulseUs = ESC_MIN_US;
   } else if (actualPulseUs < throttleUs) {
@@ -262,7 +437,9 @@ void updateESC(unsigned long now) {
 void setup() {
   Serial.begin(115200);
   pinMode(LED_R_PIN, OUTPUT);
-  digitalWrite(LED_R_PIN, HIGH);
+  pinMode(LED_G_PIN, OUTPUT);
+  pinMode(LED_B_PIN, OUTPUT);
+  setLed(false, false, false);
 
   beginButton(upButton);
   beginButton(downButton);
@@ -295,8 +472,9 @@ void setup() {
   timeOffset = startMs;
   lastRampMs = startMs;
   Serial.println("ESC CONTROL READY - test signal with ESC POWER OFF first");
-  Serial.printf("Hold CENTER %lu ms, release -> enable/disable; short CENTER -> reset time", ARM_HOLD_MS);
-  Serial.printf("UP/DOWN +/- %d us; LEFT/RIGHT = software stop", THROTTLE_STEP_US);
+  Serial.printf("Hold CENTER %lu ms, release -> enable/disable; short CENTER -> reset time\n", ARM_HOLD_MS);
+  Serial.printf("Hold CENTER %lu ms (while disabled), release -> ESC calibration\n", CAL_HOLD_MS);
+  Serial.printf("UP/DOWN +/- %d us; LEFT = max; RIGHT = software stop\n", THROTTLE_STEP_US);
 }
 
 // ---------------------------------------------------------
@@ -306,8 +484,11 @@ void loop() {
   unsigned long now = millis();
   processButtons(now);
   updateESC(now);
+  updateCalibration(now);
+  updateLed(now);
 
-  if (now - lastPrintMs >= 500) {
+  // Status line is suppressed during calibration so instructions stay readable
+  if (calState == CAL_IDLE && now - lastPrintMs >= 500) {
     lastPrintMs = now;
     Serial.printf("time=%lu ms, enabled=%d, target=%d us, actual=%d us\n",
                   now - timeOffset, enabled ? 1 : 0, throttleUs, actualPulseUs);
